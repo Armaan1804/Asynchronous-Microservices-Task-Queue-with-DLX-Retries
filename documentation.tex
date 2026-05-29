@@ -1,0 +1,380 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{titlesec}
+
+% Define color palette for code syntax highlighting
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.92}
+
+\lstdefinestyle{mystyle}{
+    backgroundcolor=\color{backcolour},   
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{magenta},
+    numberstyle=\tiny\color{codegray},
+    stringstyle=\color{codepurple},
+    basicstyle=\ttfamily\footnotesize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+}
+\lstset{style=mystyle}
+
+\title{\textbf{Comprehensive Technical Reference:\\Resilient Distributed Task Queue System}}
+\author{Armaan}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction \& System Architecture}
+
+\subsection{Monolithic vs. Decoupled Architectures}
+In traditional monolithic web applications, client requests are handled synchronously. When a client performs an action that triggers a resource-intensive task (such as processing an image, generating a PDF, or communicating with third-party APIs), the thread handling the HTTP request is blocked until the task completes. This leads to:
+\begin{itemize}
+    \item \textbf{Poor User Experience}: The client experiences latency and spin wheels.
+    \item \textbf{Resource Starvation}: Web servers have a finite thread pool. If multiple clients trigger heavy tasks simultaneously, the server exhausts its available threads, crashing or rejecting incoming traffic.
+    \item \textbf{Lack of Scalability}: You cannot scale the compute power of individual slow tasks independently of the web API gateway.
+\end{itemize}
+
+A \textbf{Decoupled (Asynchronous) Architecture} solves this by separating the system into two distinct services:
+\begin{enumerate}
+    \item \textbf{Producer Service (API Gateway)}: Responsible only for validating requests, generating unique tracking IDs, logging the initial state in a database, and publishing a lightweight payload to a message broker. It returns an immediate $200\text{ OK}$ or $202\text{ Accepted}$ response to the client.
+    \item \textbf{Consumer Service (Worker Node)}: A standalone application running in the background. It consumes task payloads from the message broker, executes the business logic, and logs status updates to the database.
+\end{enumerate}
+
+\subsection{The Restaurant Analogy}
+To understand the functioning of this decoupled architecture, consider the following mapping:
+\begin{itemize}
+    \item \textbf{The Client} represents the \textbf{Customer} placing an order.
+    \item \textbf{The Producer Service} acts as the \textbf{Waiter}. The waiter takes the order, writes it in the order book, pins the ticket on the kitchen wheel, and immediately moves to help the next customer.
+    \item \textbf{PostgreSQL} acts as the \textbf{Order Book}. It is the shared master record where both the waiter and chef log the real-time status of orders (e.g., \texttt{QUEUED}, \texttt{PROCESSING}, \texttt{COMPLETED}, \texttt{FAILED}).
+    \item \textbf{RabbitMQ} acts as the \textbf{Kitchen Ticket Wheel}. It is the queueing mechanism holding the tasks until a chef is ready.
+    \item \textbf{The Worker Service} represents the \textbf{Chef}. The chef pulls a ticket off the wheel, spends time cooking the meal, and writes ``COMPLETED'' in the order book once the dish is ready.
+    \item \textbf{The Dead Letter Queue (DLQ)} is the \textbf{Problem Table}. If a chef attempts to cook a dish 3 times and repeatedly burns it, the chef places the ticket on a separate table for the manager to inspect later, preventing the kitchen wheel from being clogged.
+\end{itemize}
+
+\newpage
+\section{RabbitMQ Core Concepts}
+
+RabbitMQ is an open-source message broker that implements the Advanced Message Queuing Protocol (AMQP). It acts as a mailroom that accepts, stores, and routes messages.
+
+\subsection{Key Entities \& Terminology}
+\begin{itemize}
+    \item \textbf{Message}: The data package transmitted between services (typically JSON in modern systems).
+    \item \textbf{Producer}: The application that publishes messages to RabbitMQ.
+    \item \textbf{Exchange}: The routing agent. Producers do not publish directly to queues; instead, they publish to exchanges, which analyze routing keys to distribute messages to bound queues.
+    \item \textbf{Queue}: A FIFO (First-In, First-Out) buffer that stores messages in memory or on disk.
+    \item \textbf{Binding}: A link or relationship connecting an exchange to a queue.
+    \item \textbf{Routing Key}: An address label attached to a message by the producer.
+    \item \textbf{Binding Key}: An address pattern configured on a queue binding that the exchange matches against the message's routing key.
+    \item \textbf{Consumer}: The application that subscribes to a queue and receives messages.
+\end{itemize}
+
+\subsection{Exchange Types}
+The routing algorithm of RabbitMQ is determined by the type of exchange used:
+\begin{enumerate}
+    \item \textbf{Direct Exchange}: Routes messages based on an exact match between the message's routing key and the queue's binding key. Useful for direct task targeting.
+    \item \textbf{Fanout Exchange}: Ignores routing keys and broadcasts every message it receives to all queues bound to it. Useful for publish-subscribe patterns.
+    \item \textbf{Topic Exchange}: Routes messages to one or many queues using wildcard matching on routing keys. Keys must be dot-separated words.
+    \begin{itemize}
+        \item \texttt{*} matches exactly one word (e.g., \texttt{task.*}).
+        \item \texttt{\#} matches zero or more words (e.g., \texttt{task.\#}).
+    \end{itemize}
+    \item \textbf{Headers Exchange}: Routes messages based on headers arguments instead of routing keys.
+\end{enumerate}
+
+\subsection{Load Balancing: Round-Robin vs. Fair Dispatch}
+By default, RabbitMQ uses **Round-Robin** to dispatch messages. It sends the $N$-th message to the $N$-th consumer, regardless of whether that consumer is busy or idle. If Worker A receives multiple heavy tasks while Worker B receives fast tasks, Worker A gets bottlenecked while Worker B sits idle.
+
+To enforce **Fair Dispatch**, we configure:
+\begin{lstlisting}[language=properties]
+spring.rabbitmq.listener.simple.prefetch=1
+\end{lstlisting}
+The \textbf{prefetch value} of 1 tells RabbitMQ: ``Do not dispatch a new message to a worker until that worker has processed and acknowledged its current message.'' This achieves perfect work-stealing load balancing.
+
+\newpage
+\section{Fault Tolerance \& Resiliency Patterns}
+
+Production environments are prone to transient issues (network timeouts, database locks) and permanent errors (null pointers, bad input payloads). To build a reliable task queue, we must incorporate automatic retries and dead-lettering.
+
+\subsection{Spring AMQP Retries}
+We configure the Spring listener container to retry failed tasks locally before returning a negative acknowledgment to RabbitMQ.
+
+\begin{itemize}
+    \item \textbf{Max Attempts}: The number of times the listener attempts to process the message. In our configuration, this is set to 3.
+    \item \textbf{Exponential Back-off}: Instead of retrying instantly, the system waits for an increasing interval between retries to give temporary outages time to resolve.
+    \item \textbf{Initial Interval}: The wait time before the first retry (e.g., $1000\text{ ms}$).
+    \item \textbf{Multiplier}: The factor by which the interval is multiplied after each attempt (e.g., $2.0$ means $1\text{ s} \rightarrow 2\text{ s} \rightarrow 4\text{ s}$).
+    \item \textbf{Max Interval}: The upper ceiling of the wait time (e.g., $5000\text{ ms}$).
+\end{itemize}
+
+\subsection{Dead Letter Exchange (DLX) \& Dead Letter Queue (DLQ)}
+When a message fails processing after all local retries are exhausted, it must not be requeued back into the main queue (otherwise it will cause an infinite loop of failures). Instead, it is sent to a **Dead Letter Exchange (DLX)**.
+
+We configure the main queue with custom arguments that tell RabbitMQ where to send dead messages:
+\begin{lstlisting}[language=java]
+@Bean
+public Queue taskQueue() {
+    return QueueBuilder.durable("task_queue")
+            .withArgument("x-dead-letter-exchange", "task_dlx")
+            .withArgument("x-dead-letter-routing-key", "task_routing_key_dlq")
+            .build();
+}
+\end{lstlisting}
+
+If a worker nacks (negatively acknowledges) a message with \texttt{requeue=false}, RabbitMQ automatically intercepts it and republishes it to the DLX. The DLX routes it to the **Dead Letter Queue (DLQ)** (\texttt{task\_queue\_dlq}) for administrative debugging.
+
+\subsection{The Requeue Trap}
+By default, if an exception is thrown in a `@RabbitListener` method, Spring will nack the message. If the simple container property \texttt{default-requeue-rejected} is set to true, the message returns to the main queue and is immediately retried. If the error is due to a bad input payload, the message will fail forever, consuming 100\% CPU.
+To prevent this, we set:
+\begin{lstlisting}[language=properties]
+spring.rabbitmq.listener.simple.default-requeue-rejected=false
+\end{lstlisting}
+This forces failed messages (that have exhausted their local Spring retries) to be rejected directly to the DLX.
+
+\newpage
+\section{Database State \& Audit Columns}
+
+While RabbitMQ manages the delivery of message payloads, it does not keep a historical log of task results once they are consumed. For tracking, reporting, and audit purposes, we write to a PostgreSQL database.
+
+\subsection{Shared Database Schema}
+Both services connect to the same PostgreSQL database (\texttt{task\_db}) and read/write to the \texttt{tasks} table:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+\textbf{Column Name} & \textbf{Data Type} & \textbf{Description} \\ \midrule
+\texttt{task\_id} & VARCHAR(255) & Primary Key (UUID generated by Producer) \\
+\texttt{task\_type} & VARCHAR(255) & Type of task (e.g., ``ImageProcessing'') \\
+\texttt{execution\_time\_ms} & INT & Estimated execution duration \\
+\texttt{status} & VARCHAR(255) & \texttt{QUEUED}, \texttt{PROCESSING}, \texttt{COMPLETED}, \texttt{FAILED} \\
+\texttt{failure\_reason} & VARCHAR(1000) & Log of exception message if task fails \\
+\texttt{retry\_count} & INT & Current attempt count (0 to 3) \\
+\texttt{created\_at} & TIMESTAMP & Time task was submitted \\
+\texttt{updated\_at} & TIMESTAMP & Time of last status update \\ \bottomrule
+\end{tabular}
+\caption{Database Schema of the Tasks Table}
+\end{table}
+
+\subsection{Lifecycle of Task Status}
+\begin{enumerate}
+    \item \textbf{API Submit}: The Producer receives the REST call, creates a record with \texttt{QUEUED} status, and publishes it.
+    \item \textbf{Worker Consumer Start}: The Worker receives the message, queries the database, increments the \texttt{retry\_count}, updates the status to \texttt{PROCESSING}, and begins execution.
+    \item \textbf{Successful Finish}: If the worker finishes without errors, it updates status to \texttt{COMPLETED} and clears any \texttt{failure\_reason}.
+    \item \textbf{Failure}: If an error is thrown, the worker catches the exception, updates the database with the error text in \texttt{failure\_reason}, and keeps status as \texttt{PROCESSING} for attempts 1 and 2. On the 3rd attempt, it marks the status as \texttt{FAILED} and re-throws the error to trigger the DLX.
+\end{enumerate}
+
+\newpage
+\section{Containerization \& Docker Orchestration}
+
+\subsection{Docker Images vs. Containers}
+An \textbf{Image} is a read-only snapshot containing the OS filesystem, runtimes (like Java JDK), and compiled application jar. A \textbf{Container} is a runnable instance of an image that runs in an isolated user-space process on the host kernel.
+
+\subsection{Dockerfile Multi-Stage Builds}
+To compile and package our Spring Boot apps without requiring the host system to have Maven or JDK installed, we use a multi-stage Dockerfile:
+
+\begin{lstlisting}[language=docker]
+# Stage 1: Compile and package the jar
+FROM maven:3.8.5-openjdk-17 AS build
+WORKDIR /app
+COPY pom.xml .
+RUN mvn dependency:go-offline -B
+COPY src ./src
+RUN mvn clean package -DskipTests
+
+# Stage 2: Create a minimal runtime image
+FROM openjdk:17-jdk-slim
+WORKDIR /app
+COPY --from=build /app/target/*.jar app.jar
+ENTRYPOINT ["java", "-jar", "app.jar"]
+\end{lstlisting}
+
+\textbf{Advantages of Multi-Stage Builds}:
+- **Smaller Image Size**: Stage 2 does not copy the Maven compiler, downloads, or local source code files; it only copies the final compiled executable `.jar` file.
+- **Security**: Reduces the attack surface of the container by omitting build tools.
+
+\subsection{Docker Compose Orchestration}
+Docker Compose manages the lifecycle of multiple containers, sets up isolated internal networks, and configures environment variables so that the containers can communicate using service names instead of volatile IP addresses.
+
+For example, when \texttt{producer-service} sets:
+\begin{lstlisting}[language=yaml]
+environment:
+  SPRING_RABBITMQ_HOST: rabbitmq
+\end{lstlisting}
+Docker's internal DNS automatically resolves the host name \texttt{rabbitmq} to the IP address of the RabbitMQ container running on the shared virtual network.
+
+We use \textbf{health checks} and dependencies to ensure containers boot in the correct order:
+\begin{lstlisting}[language=yaml]
+depends_on:
+  rabbitmq:
+    condition: service_healthy
+\end{lstlisting}
+This prevents the Spring Boot apps from booting and crashing before RabbitMQ is fully initialized and listening on port 5672.
+
+\newpage
+\section{Core Implementation Code Reference}
+
+\subsection{Producer Service: RabbitMQ Config}
+\begin{lstlisting}[language=java]
+package com.example.taskqueue.config;
+
+import org.springframework.amqp.core.*;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class RabbitMQConfig {
+
+    public static final String QUEUE_NAME = "task_queue";
+    public static final String EXCHANGE_NAME = "task_exchange";
+    public static final String ROUTING_KEY = "task_routing_key";
+
+    public static final String DLQ_NAME = "task_queue_dlq";
+    public static final String DLX_EXCHANGE_NAME = "task_dlx";
+    public static final String DLQ_ROUTING_KEY = "task_routing_key_dlq";
+
+    @Bean
+    public Queue taskQueue() {
+        return QueueBuilder.durable(QUEUE_NAME)
+                .withArgument("x-dead-letter-exchange", DLX_EXCHANGE_NAME)
+                .withArgument("x-dead-letter-routing-key", DLQ_ROUTING_KEY)
+                .build();
+    }
+
+    @Bean
+    public DirectExchange taskExchange() {
+        return new DirectExchange(EXCHANGE_NAME);
+    }
+
+    @Bean
+    public Binding binding(Queue taskQueue, DirectExchange taskExchange) {
+        return BindingBuilder.bind(taskQueue).to(taskExchange).with(ROUTING_KEY);
+    }
+
+    @Bean
+    public Queue taskQueueDlq() {
+        return QueueBuilder.durable(DLQ_NAME).build();
+    }
+
+    @Bean
+    public DirectExchange deadLetterExchange() {
+        return new DirectExchange(DLX_EXCHANGE_NAME);
+    }
+
+    @Bean
+    public Binding dlqBinding(Queue taskQueueDlq, DirectExchange deadLetterExchange) {
+        return BindingBuilder.bind(taskQueueDlq).to(deadLetterExchange).with(DLQ_ROUTING_KEY);
+    }
+}
+\end{lstlisting}
+
+\newpage
+\subsection{Worker Service: Consumer Processing Engine}
+\begin{lstlisting}[language=java]
+package com.example.taskqueue.consumer;
+
+import com.example.taskqueue.model.Task;
+import com.example.taskqueue.model.TaskPayload;
+import com.example.taskqueue.repository.TaskRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.amqp.rabbit.annotation.RabbitListener;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+@Service
+public class TaskWorker {
+
+    private static final Logger logger = LoggerFactory.getLogger(TaskWorker.class);
+    private final TaskRepository taskRepository;
+
+    @Autowired
+    public TaskWorker(TaskRepository taskRepository) {
+        this.taskRepository = taskRepository;
+    }
+
+    @RabbitListener(queues = "task_queue")
+    public void processTask(TaskPayload task) {
+        Task taskEntity = taskRepository.findById(task.getTaskId())
+                .orElseGet(() -> new Task(task.getTaskId(), task.getTaskType(), task.getExecutionTimeMs(), "PROCESSING"));
+
+        int currentAttempt = taskEntity.getRetryCount() + 1;
+        taskEntity.setRetryCount(currentAttempt);
+        taskEntity.setStatus("PROCESSING");
+        taskRepository.save(taskEntity);
+
+        logger.info("Received Task ID: {} - Attempt: {}", task.getTaskId(), currentAttempt);
+
+        try {
+            if ("fail".equalsIgnoreCase(task.getTaskType())) {
+                throw new RuntimeException("Simulated task processing failure");
+            }
+
+            Thread.sleep(task.getExecutionTimeMs());
+
+            taskEntity.setStatus("COMPLETED");
+            taskEntity.setFailureReason(null);
+            taskRepository.save(taskEntity);
+            logger.info("Successfully completed Task ID: {}", task.getTaskId());
+
+        } catch (Exception e) {
+            logger.error("Error processing Task ID: {} on attempt: {}", task.getTaskId(), currentAttempt);
+            taskEntity.setFailureReason(e.getMessage());
+
+            if (currentAttempt >= 3) {
+                taskEntity.setStatus("FAILED");
+            }
+            taskRepository.save(taskEntity);
+            throw new RuntimeException(e);
+        }
+    }
+}
+\end{lstlisting}
+
+\newpage
+\section{Interview Q\&A Cheat Sheet}
+
+\subsection*{Q1: What is the purpose of decoupling using a message queue?}
+**Answer**: Decoupling separates the client-facing API server from the compute-intensive job execution environment. It prevents incoming HTTP request threads from blocking, ensures the API remains responsive, isolates failures (a worker crash does not crash the web server), and allows horizontal scaling of workers independently based on queue sizes.
+
+\subsection*{Q2: How does RabbitMQ handle message durability?}
+**Answer**: Durability involves marking both the queue and the messages as durable. In our code, we declared the queues using `QueueBuilder.durable(QUEUE_NAME).build()`. When durable queues are declared, RabbitMQ persists their definitions to disk. Additionally, Spring Boot's `RabbitTemplate` publishes messages using a delivery mode of `PERSISTENT` by default, ensuring that messages survive a RabbitMQ server restart.
+
+\subsection*{Q3: What is the difference between Round-Robin and Fair Dispatch in RabbitMQ?}
+**Answer**: Round-robin distributes messages sequentially among all registered consumers regardless of how busy they are, which can bottleneck a single consumer with heavy tasks. Fair dispatch (enabled by setting `prefetch=1`) restricts the broker from sending a new message to a consumer until that consumer has processed and acknowledged its previous message.
+
+\subsection*{Q4: What is a Dead Letter Exchange (DLX) and when is a message sent to it?}
+**Answer**: A DLX is a normal exchange configured on a queue to handle rejected or failed messages. A message is routed to the DLX when:
+1. It is rejected (\texttt{basic.reject} or \texttt{basic.nack}) by a consumer with the `requeue` flag set to `false`.
+2. The message TTL (Time to Live) expires.
+3. The queue reaches its maximum length limit.
+
+\subsection*{Q5: What is the role of the database in this architecture?}
+**Answer**: Since RabbitMQ is a message broker and deletes messages once they are successfully consumed and acknowledged, the database acts as the system of record. It stores the historical log, real-time statuses (`QUEUED`, `PROCESSING`, `COMPLETED`, `FAILED`), audit timestamps, and execution tracking metrics for system monitoring and user queries.
+
+\subsection*{Q6: Why did you use Docker Multi-Stage builds?}
+**Answer**: Multi-stage builds compile the application inside a temporary container containing the build tools (Maven), and then copy only the compiled executable binary (`.jar`) into a final, minimal runtime-only container. This reduces the size of the final production image, optimizes compile cache usage, and improves security by excluding build utilities from production.
+
+\end{document}
