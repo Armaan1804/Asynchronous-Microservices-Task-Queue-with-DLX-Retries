@@ -108,7 +108,7 @@ The routing algorithm of RabbitMQ is determined by the type of exchange used:
 By default, RabbitMQ uses **Round-Robin** to dispatch messages. It sends the $N$-th message to the $N$-th consumer, regardless of whether that consumer is busy or idle. If Worker A receives multiple heavy tasks while Worker B receives fast tasks, Worker A gets bottlenecked while Worker B sits idle.
 
 To enforce **Fair Dispatch**, we configure:
-\begin{lstlisting}[language=properties]
+\begin{lstlisting}
 spring.rabbitmq.listener.simple.prefetch=1
 \end{lstlisting}
 The \textbf{prefetch value} of 1 tells RabbitMQ: ``Do not dispatch a new message to a worker until that worker has processed and acknowledged its current message.'' This achieves perfect work-stealing load balancing.
@@ -148,7 +148,7 @@ If a worker nacks (negatively acknowledges) a message with \texttt{requeue=false
 \subsection{The Requeue Trap}
 By default, if an exception is thrown in a `@RabbitListener` method, Spring will nack the message. If the simple container property \texttt{default-requeue-rejected} is set to true, the message returns to the main queue and is immediately retried. If the error is due to a bad input payload, the message will fail forever, consuming 100\% CPU.
 To prevent this, we set:
-\begin{lstlisting}[language=properties]
+\begin{lstlisting}
 spring.rabbitmq.listener.simple.default-requeue-rejected=false
 \end{lstlisting}
 This forces failed messages (that have exhausted their local Spring retries) to be rejected directly to the DLX.
@@ -195,7 +195,7 @@ An \textbf{Image} is a read-only snapshot containing the OS filesystem, runtimes
 \subsection{Dockerfile Multi-Stage Builds}
 To compile and package our Spring Boot apps without requiring the host system to have Maven or JDK installed, we use a multi-stage Dockerfile:
 
-\begin{lstlisting}[language=docker]
+\begin{lstlisting}[language=bash]
 # Stage 1: Compile and package the jar
 FROM maven:3.8.5-openjdk-17 AS build
 WORKDIR /app
@@ -219,14 +219,14 @@ ENTRYPOINT ["java", "-jar", "app.jar"]
 Docker Compose manages the lifecycle of multiple containers, sets up isolated internal networks, and configures environment variables so that the containers can communicate using service names instead of volatile IP addresses.
 
 For example, when \texttt{producer-service} sets:
-\begin{lstlisting}[language=yaml]
+\begin{lstlisting}
 environment:
   SPRING_RABBITMQ_HOST: rabbitmq
 \end{lstlisting}
 Docker's internal DNS automatically resolves the host name \texttt{rabbitmq} to the IP address of the RabbitMQ container running on the shared virtual network.
 
 We use \textbf{health checks} and dependencies to ensure containers boot in the correct order:
-\begin{lstlisting}[language=yaml]
+\begin{lstlisting}
 depends_on:
   rabbitmq:
     condition: service_healthy
@@ -360,21 +360,21 @@ public class TaskWorker {
 **Answer**: Decoupling separates the client-facing API server from the compute-intensive job execution environment. It prevents incoming HTTP request threads from blocking, ensures the API remains responsive, isolates failures (a worker crash does not crash the web server), and allows horizontal scaling of workers independently based on queue sizes.
 
 \subsection*{Q2: How does RabbitMQ handle message durability?}
-**Answer**: Durability involves marking both the queue and the messages as durable. In our code, we declared the queues using `QueueBuilder.durable(QUEUE_NAME).build()`. When durable queues are declared, RabbitMQ persists their definitions to disk. Additionally, Spring Boot's `RabbitTemplate` publishes messages using a delivery mode of `PERSISTENT` by default, ensuring that messages survive a RabbitMQ server restart.
+**Answer**: Durability involves marking both the queue and the messages as durable. In our code, we declared the queues using \texttt{QueueBuilder.durable(QUEUE\_NAME).build()}. When durable queues are declared, RabbitMQ persists their definitions to disk. Additionally, Spring Boot's \texttt{RabbitTemplate} publishes messages using a delivery mode of \texttt{PERSISTENT} by default, ensuring that messages survive a RabbitMQ server restart.
 
 \subsection*{Q3: What is the difference between Round-Robin and Fair Dispatch in RabbitMQ?}
-**Answer**: Round-robin distributes messages sequentially among all registered consumers regardless of how busy they are, which can bottleneck a single consumer with heavy tasks. Fair dispatch (enabled by setting `prefetch=1`) restricts the broker from sending a new message to a consumer until that consumer has processed and acknowledged its previous message.
+**Answer**: Round-robin distributes messages sequentially among all registered consumers regardless of how busy they are, which can bottleneck a single consumer with heavy tasks. Fair dispatch (enabled by setting \texttt{prefetch=1}) restricts the broker from sending a new message to a consumer until that consumer has processed and acknowledged its previous message.
 
 \subsection*{Q4: What is a Dead Letter Exchange (DLX) and when is a message sent to it?}
 **Answer**: A DLX is a normal exchange configured on a queue to handle rejected or failed messages. A message is routed to the DLX when:
-1. It is rejected (\texttt{basic.reject} or \texttt{basic.nack}) by a consumer with the `requeue` flag set to `false`.
+1. It is rejected (\texttt{basic.reject} or \texttt{basic.nack}) by a consumer with the \texttt{requeue} flag set to \texttt{false}.
 2. The message TTL (Time to Live) expires.
 3. The queue reaches its maximum length limit.
 
 \subsection*{Q5: What is the role of the database in this architecture?}
-**Answer**: Since RabbitMQ is a message broker and deletes messages once they are successfully consumed and acknowledged, the database acts as the system of record. It stores the historical log, real-time statuses (`QUEUED`, `PROCESSING`, `COMPLETED`, `FAILED`), audit timestamps, and execution tracking metrics for system monitoring and user queries.
+**Answer**: Since RabbitMQ is a message broker and deletes messages once they are successfully consumed and acknowledged, the database acts as the system of record. It stores the historical log, real-time statuses (\texttt{QUEUED}, \texttt{PROCESSING}, \texttt{COMPLETED}, \texttt{FAILED}), audit timestamps, and execution tracking metrics for system monitoring and user queries.
 
 \subsection*{Q6: Why did you use Docker Multi-Stage builds?}
-**Answer**: Multi-stage builds compile the application inside a temporary container containing the build tools (Maven), and then copy only the compiled executable binary (`.jar`) into a final, minimal runtime-only container. This reduces the size of the final production image, optimizes compile cache usage, and improves security by excluding build utilities from production.
+**Answer**: Multi-stage builds compile the application inside a temporary container containing the build tools (Maven), and then copy only the compiled executable binary (\texttt{.jar}) into a final, minimal runtime-only container. This reduces the size of the final production image, optimizes compile cache usage, and improves security by excluding build utilities from production.
 
 \end{document}
