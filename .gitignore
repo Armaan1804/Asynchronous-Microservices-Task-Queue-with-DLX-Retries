@@ -1,0 +1,25 @@
+# Maven Build Artifacts
+**/target/
+**/*.jar
+**/*.war
+**/*.ear
+
+# IntelliJ IDEA Metadata
+**/.idea/
+**/*.iml
+**/*.ipr
+**/*.iws
+out/
+
+# Eclipse Metadata
+.metadata/
+.classpath
+.project
+.settings/
+*.tmp
+*.bak
+*.swp
+
+# OS Files
+Thumbs.db
+.DS_Store
